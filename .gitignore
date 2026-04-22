@@ -1,0 +1,53 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.venv/
+venv/
+env/
+
+# =========================
+# Data / datasets
+# =========================
+data/
+*.csv
+*.parquet
+*.json
+data/creditcard.csv
+# =========================
+# Airflow
+# =========================
+airflow/logs/
+airflow/config/
+airflow/.env
+
+# =========================
+# dbt
+# =========================
+dbt_project/target/
+dbt_project/logs/
+dbt_project/dbt_packages/
+
+# =========================
+# Environment variables / secrets
+# =========================
+.env
+*.env
+*.json
+
+# =========================
+# OS / Editor
+# =========================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# =========================
+# Docker
+# =========================
+*.log

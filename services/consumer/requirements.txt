@@ -1,0 +1,4 @@
+confluent-kafka==2.8.2
+minio==7.2.15
+#psycopg2-binary==2.9.10
+neo4j==5.28.1
