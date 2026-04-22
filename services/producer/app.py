@@ -75,6 +75,10 @@ def main():
 
     wait_for_kafka()
 
+    while not os.path.exists(CSV_PATH):
+        print(f"[PRODUCER] Waiting for dataset at {CSV_PATH}...")
+        time.sleep(5)
+
     df = load_dataset(CSV_PATH)
     print(f"[PRODUCER] Loaded dataset with {len(df)} rows")
 

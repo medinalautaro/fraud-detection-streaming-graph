@@ -64,6 +64,15 @@ services:
       - neo4j_logs:/logs
     restart: unless-stopped
 
+  data_ingestion:
+    build:
+      context: ./services/data_ingestion
+    container_name: fraud_data_ingestion
+    volumes:
+      - shared_data:/data
+      - ./kaggle.json:/root/.kaggle/kaggle.json:ro
+    restart: "no"  
+
   producer:
     build:
       context: ./services/producer
@@ -92,7 +101,7 @@ services:
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin123
-      MINIO_BUCKET: raw-events
+      MINIO_BUCKET: fraud-lake
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: mlops
@@ -104,6 +113,60 @@ services:
       - minio
       - postgres
     restart: unless-stopped
+
+  transform:
+    build:
+      context: ./services/transform
+    container_name: mlops_transform
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: fraud-lake
+      BRONZE_PREFIX: bronze/transactions/
+      SILVER_PREFIX: silver/transactions_clean/
+      STATE_OBJECT: _state/bronze_to_silver/processed_files.json
+    depends_on:
+      - minio
+    restart: "no"
+
+  gold_builder:
+    build:
+      context: ./services/gold_builder
+    container_name: mlops_gold_builder
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: fraud-lake
+      SILVER_PREFIX: silver/transactions_clean/
+      GOLD_PREFIX: gold/training_features/
+      GOLD_VERSION: v1
+      GOLD_STATE_OBJECT: _state/silver_to_gold/processed_files.json
+      PYTHONUNBUFFERED: 1
+    depends_on:
+      - minio
+    restart: "no"
+
+  training:
+    build:
+      context: ./services/training
+    container_name: mlops_training
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      GOLD_BUCKET: fraud-lake
+      GOLD_PREFIX: gold/training_features/
+      GOLD_VERSION: v1
+      ARTIFACTS_BUCKET: ml-artifacts
+      MODEL_PREFIX: models/fraud_model/
+      METRICS_PREFIX: metrics/fraud_model/
+      REPORTS_PREFIX: reports/fraud_model/
+      PYTHONUNBUFFERED: 1
+    depends_on:
+      - minio
+    restart: "no"
 
   kafka-init:
     image: apache/kafka:4.1.2
@@ -129,3 +192,4 @@ volumes:
   kafka_data:
   neo4j_data:
   neo4j_logs:
+  shared_data:

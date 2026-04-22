@@ -4,7 +4,7 @@ import os
 import socket
 import time
 from io import BytesIO
-
+from datetime import datetime, timezone
 from confluent_kafka import Consumer
 from minio import Minio
 from minio.error import S3Error
@@ -106,9 +106,26 @@ def ensure_bucket(client: Minio, bucket_name: str):
 
 def upload_event(client: Minio, bucket_name: str, event: dict):
     event_id = event["transaction_id"]
-    object_name = f"events/event_{event_id}.json"
+    now = datetime.now(timezone.utc)
 
-    data = json.dumps(event, ensure_ascii=False).encode("utf-8")
+    object_name = (
+        f"bronze/transactions/"
+        f"year={now.year:04d}/"
+        f"month={now.month:02d}/"
+        f"day={now.day:02d}/"
+        f"hour={now.hour:02d}/"
+        f"event_{event_id:06d}.json"
+    )
+
+    bronze_record = {
+        "ingestion_metadata": {
+            "transaction_id": event_id,
+            "ingested_at": now.isoformat(),
+        },
+        "payload": event,
+    }
+
+    data = json.dumps(bronze_record, ensure_ascii=False).encode("utf-8")
     data_stream = BytesIO(data)
 
     client.put_object(
@@ -119,7 +136,6 @@ def upload_event(client: Minio, bucket_name: str, event: dict):
         content_type="application/json",
     )
     print(f"[CONSUMER] Uploaded to MinIO: {bucket_name}/{object_name}")
-
 
 def get_neo4j_driver():
     return GraphDatabase.driver(

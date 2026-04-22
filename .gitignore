@@ -51,3 +51,28 @@ Thumbs.db
 # Docker
 # =========================
 *.log
+
+# =========================
+# Kaggle
+# =========================
+kaggle.json
+
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs
+logs/
+*.log
+
+# Data / generated files
+data/
+tmp/
+artifacts/
+mlruns/
+
+# Jupyter
+.ipynb_checkpoints/
