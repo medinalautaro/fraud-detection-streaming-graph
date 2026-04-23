@@ -5,6 +5,7 @@ import time
 
 import pandas as pd
 from confluent_kafka import Producer
+from datetime import datetime, timezone
 
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
@@ -53,19 +54,18 @@ def load_dataset(csv_path: str) -> pd.DataFrame:
     return df
 
 
+
 def row_to_event(row, transaction_id: int) -> dict:
     event = {
         "transaction_id": transaction_id,
         "time": float(row["Time"]),
         "amount": float(row["Amount"]),
         "class": int(row["Class"]),
+        "event_created_at": datetime.now(timezone.utc).isoformat(),
     }
-
     for i in range(1, 29):
         event[f"V{i}"] = float(row[f"V{i}"])
-
     return event
-
 
 def main():
     print("[PRODUCER] App started")

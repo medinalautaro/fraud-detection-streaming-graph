@@ -1,0 +1,5 @@
+confluent-kafka==2.11.1
+pandas==2.2.2
+minio==7.2.7
+joblib==1.4.2
+scikit-learn==1.5.1

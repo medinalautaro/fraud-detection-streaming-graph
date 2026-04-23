@@ -247,6 +247,65 @@ services:
       - postgres
     restart: unless-stopped
 
+  consumer_approved:
+    build: ./services/consumer
+    container_name: mlops_consumer_approved
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: approved_transactions
+      KAFKA_GROUP_ID: approved-consumer-group
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: mlops
+      MINIO_SECRET_KEY: mlops123
+      MINIO_BUCKET: mlops
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password123
+    depends_on:
+      - kafka
+      - minio
+      - neo4j
+
+  consumer_blocked:
+    build: ./services/consumer
+    container_name: mlops_consumer_blocked
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: blocked_transactions
+      KAFKA_GROUP_ID: blocked-consumer-group
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: mlops
+      MINIO_SECRET_KEY: mlops123
+      MINIO_BUCKET: mlops
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password123
+    depends_on:
+      - kafka
+      - minio
+      - neo4j
+
+  scoring:
+    build: ./services/scoring
+    container_name: mlops_scoring
+    environment:
+      PYTHONUNBUFFERED: 1
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      INPUT_TOPIC: raw_events
+      APPROVED_TOPIC: approved_transactions
+      BLOCKED_TOPIC: blocked_transactions
+      KAFKA_GROUP_ID: fraud-scoring-group
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      ARTIFACTS_BUCKET: ml-artifacts
+      MODEL_OBJECT: models/fraud_model/latest/model.joblib
+      FRAUD_THRESHOLD: 0.80
+    depends_on:
+      - kafka
+      - minio
+    restart: unless-stopped  
+
   transform:
     build:
       context: ./services/transform

@@ -3,7 +3,7 @@ import os
 import uuid
 from io import BytesIO
 from datetime import datetime, timezone
-
+from minio.error import S3Error
 import joblib
 import pandas as pd
 from minio import Minio
@@ -144,6 +144,57 @@ def upload_bytes(client: Minio, bucket_name: str, object_name: str, raw: bytes, 
         content_type=content_type,
     )
 
+def object_exists(client: Minio, bucket_name: str, object_name: str) -> bool:
+    try:
+        client.stat_object(bucket_name, object_name)
+        return True
+    except S3Error as e:
+        if e.code in {"NoSuchKey", "NoSuchObject"}:
+            return False
+        raise
+
+
+def load_joblib_object(client: Minio, bucket_name: str, object_name: str):
+    response = client.get_object(bucket_name, object_name)
+    try:
+        raw = response.read()
+        return joblib.load(BytesIO(raw))
+    finally:
+        response.close()
+        response.release_conn()
+
+
+def evaluate_model(model, X, y) -> dict:
+    pred = model.predict(X)
+    prob = model.predict_proba(X)[:, 1] if hasattr(model, "predict_proba") else None
+    return compute_metrics(y, pred, prob)
+
+
+def should_promote(candidate_metrics: dict, current_metrics: dict | None) -> tuple[bool, str]:
+    PROMOTION_MIN_DELTA = 0.005
+    RECALL_TOLERANCE = 0.01
+
+    if current_metrics is None:
+        return True, "No existing latest model"
+
+    cand_f1 = candidate_metrics["f1"]
+    curr_f1 = current_metrics["f1"]
+    cand_recall = candidate_metrics["recall"]
+    curr_recall = current_metrics["recall"]
+
+    if cand_f1 <= curr_f1 + PROMOTION_MIN_DELTA:
+        return (
+            False,
+            f"Candidate f1={cand_f1:.6f} not greater than current f1={curr_f1:.6f} + min_delta={PROMOTION_MIN_DELTA:.6f}",
+        )
+
+    if cand_recall < curr_recall - RECALL_TOLERANCE:
+        return (
+            False,
+            f"Candidate recall={cand_recall:.6f} is worse than current recall={curr_recall:.6f} beyond tolerance={RECALL_TOLERANCE:.6f}",
+        )
+
+    return True, "Candidate outperformed current latest"
 
 def main():
     client = get_minio_client()
@@ -194,6 +245,19 @@ def main():
     val_metrics = compute_metrics(y_val, val_pred, val_prob)
     test_metrics = compute_metrics(y_test, test_pred, test_prob)
 
+    latest_model_object = f"{MODEL_PREFIX}latest/model.joblib"
+
+    current_metrics = None
+    if object_exists(client, ARTIFACTS_BUCKET, latest_model_object):
+        current_model = load_joblib_object(client, ARTIFACTS_BUCKET, latest_model_object)
+        current_metrics = evaluate_model(current_model, X_val, y_val)
+        print(f"[TRAIN] Current latest validation metrics: {current_metrics}")
+    else:
+        print("[TRAIN] No current latest model found. Candidate will be promoted automatically.")
+
+    promote, promotion_reason = should_promote(val_metrics, current_metrics)
+    print(f"[TRAIN] Promotion decision: {promote} | reason: {promotion_reason}")
+
     report = {
         "val_classification_report": classification_report(y_val, val_pred, output_dict=True, zero_division=0),
         "test_classification_report": classification_report(y_test, test_pred, output_dict=True, zero_division=0),
@@ -201,7 +265,7 @@ def main():
         "test_confusion_matrix": confusion_matrix(y_test, test_pred).tolist(),
     }
 
-    run_id = uuid.uuid4().hex[:8]
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     now = datetime.now(timezone.utc)
 
     model_object = (
@@ -242,6 +306,13 @@ def main():
         },
         "val_metrics": val_metrics,
         "test_metrics": test_metrics,
+        "promotion": {
+            "promoted": promote,
+            "reason": promotion_reason,
+            "candidate_val_metrics": val_metrics,
+            "current_val_metrics": current_metrics,
+            "serving_alias": latest_model_object,
+        },
     }
 
     upload_bytes(
@@ -251,6 +322,19 @@ def main():
         model_raw,
         "application/octet-stream",
     )
+
+    if promote:
+        upload_bytes(
+            client,
+            ARTIFACTS_BUCKET,
+            latest_model_object,
+            model_raw,
+            "application/octet-stream",
+        )
+        print(f"[TRAIN] Uploaded latest model: {ARTIFACTS_BUCKET}/{latest_model_object}")
+    else:
+        print("[TRAIN] Candidate model was NOT promoted to latest")
+
     upload_bytes(
         client,
         ARTIFACTS_BUCKET,
@@ -265,6 +349,8 @@ def main():
         json.dumps(report, indent=2).encode("utf-8"),
         "application/json",
     )
+
+
 
     print(f"[TRAIN] Uploaded model: {ARTIFACTS_BUCKET}/{model_object}")
     print(f"[TRAIN] Uploaded metrics: {ARTIFACTS_BUCKET}/{metrics_object}")
