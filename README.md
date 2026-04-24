@@ -6,6 +6,15 @@ The project uses the Credit Card Fraud Detection dataset to simulate credit card
 
 The main goal of this repository is not to build the most accurate fraud detection model. The main goal is to demonstrate how different MLOps, data engineering, graph, and streaming components can work together in a reproducible local environment.
 
+After having the data file on the data folder and doing docker composed up you can use this to check the status of the different steps:
+
+docker logs -f mlops_scoring
+docker logs -f mlops_transform
+docker logs -f mlops_gold_builder
+docker logs -f mlops_training
+
+Consider that scoring will only be able to trigger once a model has been trained. A model will be trained once enough fraudel transaction load to gold, that might take some time.
+
 ---
 
 ## Dataset
