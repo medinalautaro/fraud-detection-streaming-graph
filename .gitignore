@@ -13,8 +13,7 @@ env/
 # =========================
 # Data / datasets
 # =========================
-data/
-*.csv
+
 *.parquet
 *.json
 data/creditcard.csv
@@ -69,7 +68,7 @@ logs/
 *.log
 
 # Data / generated files
-data/
+
 tmp/
 artifacts/
 mlruns/

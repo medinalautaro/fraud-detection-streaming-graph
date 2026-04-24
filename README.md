@@ -1,32 +1,95 @@
 # Fraud Detection Streaming Graph
 
-End-to-end MLOps project for fraud detection using simulated streaming data, a local data lake, graph storage, batch orchestration, model training, and a GraphQL query layer.
+End-to-end local MLOps project for fraud detection using simulated streaming data, Kafka, MinIO, Neo4j, Airflow, GraphQL, and a baseline machine learning model.
 
-The project uses the Credit Card Fraud Detection dataset to simulate transaction events. Events are streamed through Kafka, persisted in MinIO as a lakehouse-style storage layer, represented in Neo4j as a graph, transformed into Silver and Gold datasets, and used to train a baseline fraud detection model.
+The project uses the Credit Card Fraud Detection dataset to simulate credit card transaction events. Events are streamed through Kafka, persisted in MinIO as a lakehouse-style data layer, represented in Neo4j as a graph, transformed through Bronze, Silver, and Gold layers, and used to train a baseline fraud detection model.
 
-## Set up
+The main goal of this repository is not to build the most accurate fraud detection model. The main goal is to demonstrate how different MLOps, data engineering, graph, and streaming components can work together in a reproducible local environment.
 
+---
+
+## Dataset
+
+This project uses the Kaggle Credit Card Fraud Detection dataset:
+
+```text
 https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud
+```
+PLEASE DOWNLOAD THE DATA AND PLACE IT IN THE DATA FOLDER.
 
-Download the data for this dataset and paste creditcard.csv in the data folder.
+The producer expects the dataset at:
+
+```text
+data/creditcard.csv
+```
+
+The dataset contains anonymized transaction features:
+
+- `Time`
+- `Amount`
+- `V1` to `V28`
+- `Class`
+
+The target variable is:
+
+```text
+Class
+```
+
+Where:
+
+```text
+0 = legitimate transaction
+1 = fraudulent transaction
+```
 
 
+---
+
+## Table of Contents
+
+- [Project Goals](#project-goals)
+- [Architecture](#architecture)
+- [Tech Stack](#tech-stack)
+- [Repository Structure](#repository-structure)
+- [Dataset](#dataset)
+- [Main Services](#main-services)
+- [Data Lake Layers](#data-lake-layers)
+- [ML Artifacts](#ml-artifacts)
+- [Graph Model](#graph-model)
+- [Requirements](#requirements)
+- [Environment Setup](#environment-setup)
+- [Running the Project](#running-the-project)
+- [Useful URLs](#useful-urls)
+- [Default Credentials](#default-credentials)
+- [Common Commands](#common-commands)
+- [Validation](#validation)
+- [Example GraphQL Queries](#example-graphql-queries)
+- [Example Neo4j Queries](#example-neo4j-queries)
+- [Troubleshooting](#troubleshooting)
+- [Possible Improvements](#possible-improvements)
+- [Author](#author)
+
+---
 
 ## Project Goals
 
-This repository focuses on MLOps architecture rather than model complexity. The main objective is to demonstrate how different production-oriented components can work together in a local, reproducible environment.
+This repository focuses on MLOps architecture and system integration.
 
-The project covers:
+It demonstrates:
 
-- Streaming data ingestion with Kafka
-- Object storage with MinIO
+- Streaming transaction ingestion with Kafka
+- Local object storage with MinIO
 - Bronze, Silver, and Gold data lake layers
-- Graph modeling with Neo4j
-- Workflow orchestration with Apache Airflow
-- Batch validation pipelines
-- Baseline ML training from Gold data
-- Artifact storage for models, metrics, and reports
-- GraphQL API for querying transaction data
+- Graph-based transaction representation with Neo4j
+- GraphQL access to graph data
+- Batch orchestration with Apache Airflow
+- Baseline fraud detection model training
+- Model artifact storage
+- Real-time scoring and transaction routing
+- Local reproducibility through Docker Compose
+
+---
 
 ## Architecture
 
@@ -42,8 +105,25 @@ Producer Service
       v
 Kafka Topic: raw_events
       |
-      v
-Consumer Service
+      |-------------------------------|
+      |                               |
+      v                               v
+Main Consumer                   Scoring Service
+      |                               |
+      |                               v
+      |                     Loads model from MinIO
+      |                               |
+      |               ----------------|----------------
+      |               |                               |
+      |               v                               v
+      |     Kafka Topic: approved_transactions   Kafka Topic: blocked_transactions
+      |               |                               |
+      |               v                               v
+      |        Approved Consumer              Blocked Consumer
+      |               |                               |
+      |               v                               v
+      |          MinIO / Neo4j                  MinIO / Neo4j
+      |
       |----------------------------|
       v                            v
 MinIO Bronze Layer              Neo4j Graph
@@ -64,19 +144,35 @@ Training Service
 MinIO ML Artifacts
 ```
 
+### Simplified Flow
+
+```text
+CSV -> Producer -> Kafka -> Consumer -> MinIO Bronze -> Silver -> Gold -> Training -> Model Artifacts
+                    |
+                    v
+                  Neo4j -> GraphQL API
+
+CSV -> Producer -> Kafka raw_events -> Scoring -> approved_transactions / blocked_transactions
+```
+
+---
+
 ## Tech Stack
 
 | Component | Technology | Purpose |
 |---|---|---|
-| Containerization | Docker Compose | Run the full local environment |
-| Streaming | Apache Kafka | Simulate real-time transaction events |
-| Object Storage | MinIO | Store Bronze, Silver, Gold, and ML artifacts |
-| Graph Database | Neo4j | Store transaction relationships and query graph structure |
-| Relational Database | PostgreSQL | Airflow metadata database |
-| Orchestration | Apache Airflow | Run validation and batch workflows |
-| API Layer | FastAPI + Strawberry GraphQL | Query fraud and transaction graph data |
-| ML | scikit-learn | Train a baseline fraud classifier |
-| Data Processing | pandas / pyarrow | Transform and store data files |
+| Containerization | Docker Compose | Runs the complete local environment |
+| Streaming | Apache Kafka | Simulates real-time transaction events |
+| Object Storage | MinIO | Stores Bronze, Silver, Gold, and ML artifacts |
+| Graph Database | Neo4j | Stores transactions as graph nodes and relationships |
+| Relational Database | PostgreSQL | Stores Airflow metadata |
+| Orchestration | Apache Airflow | Runs and validates batch workflows |
+| API Layer | FastAPI + Strawberry GraphQL | Exposes graph data through GraphQL |
+| Machine Learning | scikit-learn | Trains a baseline fraud detection classifier |
+| Data Processing | pandas / pyarrow | Transforms and stores structured datasets |
+| Model Serialization | joblib | Saves trained model artifacts |
+
+---
 
 ## Repository Structure
 
@@ -86,7 +182,7 @@ fraud-detection-streaming-graph/
 ├── airflow/
 │   ├── dags/
 │   │   └── fraud_stream_batch_validation.py
-│   ├── dockerfile
+│   ├── Dockerfile
 │   └── requirements.txt
 │
 ├── postgres/
@@ -95,37 +191,42 @@ fraud-detection-streaming-graph/
 ├── services/
 │   ├── consumer/
 │   │   ├── app.py
-│   │   ├── dockerfile
+│   │   ├── Dockerfile
 │   │   └── requirements.txt
 │   │
 │   ├── data_ingestion/
 │   │   ├── download_data.py
-│   │   ├── dockerfile
+│   │   ├── Dockerfile
 │   │   └── requirements.txt
 │   │
 │   ├── gold_builder/
 │   │   ├── build_gold_from_silver.py
-│   │   ├── dockerfile
+│   │   ├── Dockerfile
 │   │   └── requirements.txt
 │   │
 │   ├── graphql_api/
 │   │   ├── app.py
-│   │   ├── dockerfile
+│   │   ├── Dockerfile
 │   │   └── requirements.txt
 │   │
 │   ├── producer/
 │   │   ├── app.py
-│   │   ├── dockerfile
+│   │   ├── Dockerfile
+│   │   └── requirements.txt
+│   │
+│   ├── scoring/
+│   │   ├── app.py
+│   │   ├── Dockerfile
 │   │   └── requirements.txt
 │   │
 │   ├── training/
 │   │   ├── train_from_gold.py
-│   │   ├── dockerfile
+│   │   ├── Dockerfile
 │   │   └── requirements.txt
 │   │
 │   └── transform/
 │       ├── transform_bronze_to_silver.py
-│       ├── dockerfile
+│       ├── Dockerfile
 │       └── requirements.txt
 │
 ├── docker-compose.yml
@@ -133,15 +234,148 @@ fraud-detection-streaming-graph/
 └── README.md
 ```
 
+---
+
 ## Main Services
+
+### PostgreSQL
+
+PostgreSQL is used as the metadata database for Airflow.
+
+Container:
+
+```text
+mlops_postgres
+```
+
+Default database:
+
+```text
+mlops
+```
+
+The repository includes:
+
+```text
+postgres/init.sql
+```
+
+This script creates the Airflow database automatically when PostgreSQL starts from a fresh volume.
+
+---
+
+### MinIO
+
+MinIO is used as a local S3-compatible object store.
+
+It stores:
+
+- Raw Bronze transaction events
+- Cleaned Silver datasets
+- Gold training datasets
+- Model artifacts
+- Metrics
+- Reports
+- Pipeline state files
+
+Container:
+
+```text
+mlops_minio
+```
+
+Console:
+
+```text
+http://localhost:9001
+```
+
+---
 
 ### Kafka
 
-Kafka is used as the streaming backbone. The producer publishes transaction events to the `raw_events` topic, and the consumer reads from that topic.
+Kafka is used as the streaming backbone.
 
-### Producer
+Container:
 
-The producer reads rows from `data/creditcard.csv`, converts each row into a JSON transaction event, and sends it to Kafka.
+```text
+mlops_kafka
+```
+
+Main topics:
+
+```text
+raw_events
+approved_transactions
+blocked_transactions
+```
+
+The producer publishes transaction events to:
+
+```text
+raw_events
+```
+
+The scoring service consumes from:
+
+```text
+raw_events
+```
+
+Then it routes transactions to:
+
+```text
+approved_transactions
+blocked_transactions
+```
+
+---
+
+### Data Ingestion Service
+
+The data ingestion service is responsible for downloading or preparing the dataset.
+
+Container:
+
+```text
+fraud_data_ingestion
+```
+
+It uses the Kaggle API credentials mounted from:
+
+```text
+kaggle.json
+```
+
+The expected output is:
+
+```text
+data/creditcard.csv
+```
+
+---
+
+### Producer Service
+
+The producer reads rows from:
+
+```text
+data/creditcard.csv
+```
+
+It converts each row into a JSON transaction event and sends it to Kafka.
+
+Container:
+
+```text
+mlops_producer
+```
+
+Output topic:
+
+```text
+raw_events
+```
 
 Each event contains:
 
@@ -151,80 +385,138 @@ Each event contains:
 - `class`
 - `V1` to `V28`
 
-The producer supports limiting the number of rows with `MAX_ROWS`.
+Useful environment variables:
 
-Example:
+```text
+KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+KAFKA_TOPIC=raw_events
+PRODUCER_INTERVAL_SECONDS=0.2
+CSV_PATH=/data/creditcard.csv
+```
+
+Example manual execution with limited rows:
 
 ```bash
 docker exec -w /app mlops_producer sh -c "MAX_ROWS=500 PRODUCER_INTERVAL_SECONDS=0 python -u app.py"
 ```
 
-### Consumer
+---
 
-The consumer reads transaction events from Kafka and writes them to two destinations:
+### Main Consumer Service
 
-1. MinIO Bronze layer as JSON files
-2. Neo4j as graph nodes and relationships
+The main consumer reads transaction events from Kafka and writes them to two destinations:
 
-Bronze objects are stored under:
+1. MinIO Bronze layer
+2. Neo4j graph database
+
+Container:
+
+```text
+mlops_consumer
+```
+
+Input topic:
+
+```text
+raw_events
+```
+
+Bronze path:
 
 ```text
 fraud-lake/bronze/transactions/
 ```
 
-The Neo4j graph contains:
+---
 
-- `Transaction`
-- `TimeBucket`
-- `AmountBucket`
-- `LatentGroupA`
-- `LatentGroupB`
-- `LatentGroupC`
-- `Label`
+### Approved Consumer
 
-Relationships include:
+The approved consumer reads transactions that the scoring service classified as approved.
 
-- `IN_TIME_BUCKET`
-- `IN_AMOUNT_BUCKET`
-- `HAS_GROUP_A`
-- `HAS_GROUP_B`
-- `HAS_GROUP_C`
-- `HAS_LABEL`
-
-### MinIO Data Lake
-
-MinIO acts as the local data lake.
-
-Expected lake layout:
+Container:
 
 ```text
-fraud-lake/
-├── bronze/
-│   └── transactions/
-│
-├── silver/
-│   └── transactions_clean/
-│
-├── gold/
-│   └── training_features/
-│
-└── _state/
-    ├── bronze_to_silver/
-    └── silver_to_gold/
+mlops_consumer_approved
 ```
 
-ML artifacts are stored in a separate bucket:
+Input topic:
 
 ```text
-ml-artifacts/
-├── models/
-├── metrics/
-└── reports/
+approved_transactions
 ```
+
+This allows approved transactions to be persisted separately after scoring.
+
+---
+
+### Blocked Consumer
+
+The blocked consumer reads transactions that the scoring service classified as blocked or high risk.
+
+Container:
+
+```text
+mlops_consumer_blocked
+```
+
+Input topic:
+
+```text
+blocked_transactions
+```
+
+This allows suspicious transactions to be persisted separately after scoring.
+
+---
+
+### Scoring Service
+
+The scoring service performs real-time inference over streaming transactions.
+
+Container:
+
+```text
+mlops_scoring
+```
+
+It consumes from:
+
+```text
+raw_events
+```
+
+It loads the trained model from MinIO:
+
+```text
+ml-artifacts/models/fraud_model/latest/model.joblib
+```
+
+Then it routes transactions to:
+
+```text
+approved_transactions
+blocked_transactions
+```
+
+The fraud threshold is configured with:
+
+```text
+FRAUD_THRESHOLD=0.80
+```
+
+A transaction with a fraud probability above the threshold is routed to the blocked topic. Otherwise, it is routed to the approved topic.
+
+---
 
 ### Transform Service
 
-The transform service reads Bronze transaction JSON files from MinIO, cleans and normalizes them, then writes Silver files.
+The transform service reads Bronze JSON files from MinIO, cleans and normalizes them, then writes Silver files.
+
+Container:
+
+```text
+mlops_transform
+```
 
 Input:
 
@@ -238,11 +530,31 @@ Output:
 fraud-lake/silver/transactions_clean/
 ```
 
-The service also keeps state in MinIO to avoid reprocessing already processed files.
+State object:
+
+```text
+fraud-lake/_state/bronze_to_silver/processed_files.json
+```
+
+The state object prevents already processed files from being transformed again.
+
+Run manually:
+
+```bash
+docker compose up transform
+```
+
+---
 
 ### Gold Builder
 
 The Gold builder reads Silver data and creates versioned training datasets.
+
+Container:
+
+```text
+mlops_gold_builder
+```
 
 Input:
 
@@ -256,31 +568,49 @@ Output:
 fraud-lake/gold/training_features/version=v1/
 ```
 
-The Gold layer includes train, validation, and test splits.
+State object:
+
+```text
+fraud-lake/_state/silver_to_gold/processed_files.json
+```
+
+Run manually:
+
+```bash
+docker compose up gold_builder
+```
+
+---
 
 ### Training Service
 
 The training service reads Gold data from MinIO and trains a baseline fraud detection model.
 
+Container:
+
+```text
+mlops_training
+```
+
 Current model:
 
 ```text
-Logistic Regression + StandardScaler
+StandardScaler + LogisticRegression
 ```
 
-The model uses:
+Features:
 
 - `Time`
 - `Amount`
 - `V1` to `V28`
 
-The label column is:
+Target:
 
 ```text
 Class
 ```
 
-The training service stores:
+Artifacts are written to:
 
 ```text
 ml-artifacts/models/fraud_model/
@@ -288,65 +618,51 @@ ml-artifacts/metrics/fraud_model/
 ml-artifacts/reports/fraud_model/
 ```
 
-Metrics include:
+Run manually:
 
-- Accuracy
-- Precision
-- Recall
-- F1-score
-- ROC AUC
-- Classification report
-- Confusion matrix
+```bash
+docker compose up training
+```
+
+---
 
 ### Neo4j
 
-Neo4j stores a graph representation of transactions. This allows querying transactions by label, amount buckets, time buckets, and latent feature groups.
+Neo4j stores a graph representation of transactions.
 
-Neo4j Browser:
+Container:
+
+```text
+mlops_neo4j
+```
+
+Browser:
 
 ```text
 http://localhost:7474
 ```
 
-Credentials:
+Neo4j allows queries over:
 
-```text
-Username: neo4j
-Password: password123
-```
+- Transaction labels
+- Amount buckets
+- Time buckets
+- Latent feature groups
+- Fraud-related graph patterns
 
-Example Cypher queries:
-
-```cypher
-MATCH (t:Transaction)
-RETURN t
-LIMIT 25;
-```
-
-```cypher
-MATCH (t:Transaction)-[:HAS_LABEL]->(:Label {value: 1})
-RETURN t.transaction_id, t.amount, t.time
-ORDER BY t.transaction_id DESC
-LIMIT 25;
-```
-
-```cypher
-MATCH (t:Transaction)-[:IN_AMOUNT_BUCKET]->(ab:AmountBucket)
-RETURN ab.bucket_id, count(t) AS transactions
-ORDER BY transactions DESC;
-```
-
-```cypher
-MATCH (t:Transaction)-[:IN_TIME_BUCKET]->(tb:TimeBucket)
-RETURN tb.bucket_id, count(t) AS transactions
-ORDER BY tb.bucket_id;
-```
+---
 
 ### GraphQL API
 
-The GraphQL API exposes transaction data from Neo4j.
+The GraphQL API exposes Neo4j data through a query layer.
 
-GraphQL endpoint:
+Container:
+
+```text
+mlops_graphql_api
+```
+
+Endpoint:
 
 ```text
 http://localhost:8000/graphql
@@ -358,67 +674,22 @@ Health endpoint:
 http://localhost:8000/health
 ```
 
-Example query: get one transaction
-
-```graphql
-query {
-  transaction(transactionId: 1) {
-    transactionId
-    time
-    amount
-    classValue
-    label {
-      value
-    }
-    timeBucket {
-      bucketId
-      startTime
-      endTime
-    }
-    amountBucket {
-      bucketId
-      minAmount
-      maxAmount
-    }
-  }
-}
-```
-
-Example query: latest transactions
-
-```graphql
-query {
-  transactions(limit: 10) {
-    transactionId
-    amount
-    classValue
-    label {
-      value
-    }
-  }
-}
-```
-
-Example query: fraud transactions
-
-```graphql
-query {
-  fraudTransactions(limit: 10) {
-    transactionId
-    amount
-    classValue
-    label {
-      value
-    }
-  }
-}
-```
+---
 
 ### Airflow
 
-Airflow is used to orchestrate and validate the batch flow.
+Airflow is used to orchestrate and validate parts of the batch flow.
 
-Airflow UI:
+Containers:
+
+```text
+airflow_webserver
+airflow_scheduler
+airflow_dag_processor
+airflow_init
+```
+
+UI:
 
 ```text
 http://localhost:8080
@@ -430,11 +701,156 @@ Current DAG:
 fraud_stream_batch_validation
 ```
 
-The DAG performs:
+The DAG validates that:
 
-1. Runs the producer in batch mode
-2. Validates that Bronze files exist in MinIO
-3. Validates that Transaction nodes exist in Neo4j
+1. The producer can run in batch mode
+2. Bronze files exist in MinIO
+3. Transaction nodes exist in Neo4j
+
+Expected task order:
+
+```text
+run_producer_batch -> validate_minio -> validate_neo4j
+```
+
+---
+
+## Data Lake Layers
+
+### Bronze
+
+Raw ingested transaction events.
+
+Path:
+
+```text
+fraud-lake/bronze/transactions/
+```
+
+Purpose:
+
+- Preserve raw incoming events
+- Store the original event payload
+- Keep the ingestion layer immutable
+- Provide replayability for downstream transformations
+
+---
+
+### Silver
+
+Cleaned transaction data.
+
+Path:
+
+```text
+fraud-lake/silver/transactions_clean/
+```
+
+Purpose:
+
+- Normalize fields
+- Validate schema
+- Prepare data for feature generation
+- Remove inconsistencies from raw event files
+
+---
+
+### Gold
+
+Training-ready datasets.
+
+Path:
+
+```text
+fraud-lake/gold/training_features/version=v1/
+```
+
+Purpose:
+
+- Store model-ready feature tables
+- Create train, validation, and test splits
+- Provide stable input for the training service
+- Version datasets used for model training
+
+---
+
+## ML Artifacts
+
+The training service writes outputs to the `ml-artifacts` bucket.
+
+Expected layout:
+
+```text
+ml-artifacts/
+├── models/
+│   └── fraud_model/
+│       ├── latest/
+│       │   └── model.joblib
+│       └── version=v1/
+│           └── run=<run_id>/
+│               └── model.joblib
+│
+├── metrics/
+│   └── fraud_model/
+│       └── version=v1/
+│           └── run=<run_id>/
+│               └── metrics.json
+│
+└── reports/
+    └── fraud_model/
+        └── version=v1/
+            └── run=<run_id>/
+                └── report.json
+```
+
+Metrics can include:
+
+- Accuracy
+- Precision
+- Recall
+- F1-score
+- ROC AUC
+- Classification report
+- Confusion matrix
+
+---
+
+## Graph Model
+
+Transactions are stored as graph nodes in Neo4j.
+
+Typical node types:
+
+```text
+Transaction
+Label
+TimeBucket
+AmountBucket
+LatentGroupA
+LatentGroupB
+LatentGroupC
+```
+
+Typical relationships:
+
+```text
+(:Transaction)-[:HAS_LABEL]->(:Label)
+(:Transaction)-[:IN_TIME_BUCKET]->(:TimeBucket)
+(:Transaction)-[:IN_AMOUNT_BUCKET]->(:AmountBucket)
+(:Transaction)-[:HAS_GROUP_A]->(:LatentGroupA)
+(:Transaction)-[:HAS_GROUP_B]->(:LatentGroupB)
+(:Transaction)-[:HAS_GROUP_C]->(:LatentGroupC)
+```
+
+This graph structure allows queries such as:
+
+- Fraud distribution by amount bucket
+- Fraud distribution by time bucket
+- Transactions connected to specific latent feature groups
+- High-risk transaction groups
+- Aggregated transaction patterns
+
+---
 
 ## Requirements
 
@@ -447,27 +863,13 @@ You need:
 
 No external cloud provider is required. Everything runs locally through Docker Compose.
 
-## Dataset
+---
 
-This project expects the Credit Card Fraud Detection dataset from Kaggle.
+## Environment Setup
 
-The producer expects the dataset at:
-
-```text
-data/creditcard.csv
-```
-
-This file is ignored by Git because datasets should not be committed to the repository.
-
-## Kaggle Setup
+### 1. Kaggle Credentials
 
 Create a `kaggle.json` file in the project root:
-
-```text
-kaggle.json
-```
-
-The file should contain your Kaggle API credentials:
 
 ```json
 {
@@ -476,15 +878,28 @@ The file should contain your Kaggle API credentials:
 }
 ```
 
-This file is ignored by Git.
+This file should be ignored by Git.
 
-## Environment Variables
+Expected path:
 
-Create a `.env` file in the project root:
+```text
+fraud-detection-streaming-graph/kaggle.json
+```
+
+---
+
+### 2. Environment Variables
+
+Create a `.env` file in the project root.
+
+Example:
 
 ```env
 MINIO_ROOT_USER=minioadmin
 MINIO_ROOT_PASSWORD=minioadmin123
+
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin123
 MINIO_BUCKET=fraud-lake
 
 NEO4J_URI=bolt://neo4j:7687
@@ -492,20 +907,34 @@ NEO4J_USER=neo4j
 NEO4J_PASSWORD=password123
 ```
 
-The current Docker Compose file also defines several service-level variables directly.
+The Docker Compose file also defines several service-level variables directly.
 
-## Running the Project from Zero
+---
 
-### 1. Clone the repository
+### 3. Dataset Location
+
+The producer expects:
+
+```text
+data/creditcard.csv
+```
+
+If the ingestion service is not used, download the file manually from Kaggle and place it there.
+
+---
+
+## Running the Project
+
+### 1. Clone the Repository
 
 ```bash
 git clone https://github.com/medinalautaro/fraud-detection-streaming-graph.git
 cd fraud-detection-streaming-graph
 ```
 
-### 2. Add Kaggle credentials
+### 2. Add Kaggle Credentials
 
-Place your `kaggle.json` file in the project root.
+Place `kaggle.json` in the project root:
 
 ```text
 fraud-detection-streaming-graph/kaggle.json
@@ -513,13 +942,9 @@ fraud-detection-streaming-graph/kaggle.json
 
 ### 3. Create `.env`
 
-```bash
-cp .env.example .env
-```
+Create the `.env` file using the variables shown above.
 
-If `.env.example` does not exist yet, create `.env` manually using the variables shown above.
-
-### 4. Start all services
+### 4. Start All Services
 
 ```bash
 docker compose up --build
@@ -531,28 +956,34 @@ Or run in detached mode:
 docker compose up --build -d
 ```
 
-### 5. Check running containers
+### 5. Check Running Containers
 
 ```bash
 docker ps
 ```
 
-You should see containers for:
+Expected containers include:
 
-- PostgreSQL
-- MinIO
-- Kafka
-- Kafka init
-- Neo4j
-- Airflow
-- Producer
-- Consumer
-- GraphQL API
-- Transform
-- Gold builder
-- Training
+- `mlops_postgres`
+- `mlops_minio`
+- `mlops_kafka`
+- `mlops_neo4j`
+- `mlops_graphql_api`
+- `airflow_webserver`
+- `airflow_scheduler`
+- `airflow_dag_processor`
+- `mlops_producer`
+- `mlops_consumer`
+- `mlops_consumer_approved`
+- `mlops_consumer_blocked`
+- `mlops_scoring`
+- `mlops_transform`
+- `mlops_gold_builder`
+- `mlops_training`
 
 Some batch containers may finish and exit successfully. That is expected for services with `restart: "no"`.
+
+---
 
 ## Useful URLs
 
@@ -563,6 +994,8 @@ Some batch containers may finish and exit successfully. That is expected for ser
 | GraphQL API | http://localhost:8000/graphql |
 | GraphQL Health | http://localhost:8000/health |
 | Airflow UI | http://localhost:8080 |
+
+---
 
 ## Default Credentials
 
@@ -580,99 +1013,120 @@ Username: neo4j
 Password: password123
 ```
 
+---
+
 ## Common Commands
 
-### Start everything
+### Start Everything
 
 ```bash
 docker compose up --build
 ```
 
-### Start in detached mode
+### Start Everything in Detached Mode
 
 ```bash
 docker compose up --build -d
 ```
 
-### Stop everything
+### Stop Everything
 
 ```bash
 docker compose down
 ```
 
-### Stop and delete volumes
+### Stop and Delete Volumes
 
-Use this when you want a completely fresh start:
+Use this for a completely fresh start:
 
 ```bash
 docker compose down -v
+docker compose up --build
 ```
 
-### View logs
+### View All Logs
 
 ```bash
 docker compose logs -f
 ```
 
-### View producer logs
+### View Producer Logs
 
 ```bash
 docker logs -f mlops_producer
 ```
 
-### View consumer logs
+### View Main Consumer Logs
 
 ```bash
 docker logs -f mlops_consumer
 ```
 
-### View transform logs
+### View Scoring Logs
+
+```bash
+docker logs -f mlops_scoring
+```
+
+### View Approved Consumer Logs
+
+```bash
+docker logs -f mlops_consumer_approved
+```
+
+### View Blocked Consumer Logs
+
+```bash
+docker logs -f mlops_consumer_blocked
+```
+
+### View Transform Logs
 
 ```bash
 docker logs -f mlops_transform
 ```
 
-### View Gold builder logs
+### View Gold Builder Logs
 
 ```bash
 docker logs -f mlops_gold_builder
 ```
 
-### View training logs
+### View Training Logs
 
 ```bash
 docker logs -f mlops_training
 ```
 
-### Run producer manually with limited rows
+### Run Producer Manually With Limited Rows
 
 ```bash
 docker exec -w /app mlops_producer sh -c "MAX_ROWS=500 PRODUCER_INTERVAL_SECONDS=0 python -u app.py"
 ```
 
-### Run Bronze to Silver manually
+### Run Bronze to Silver Manually
 
 ```bash
 docker compose up transform
 ```
 
-### Run Silver to Gold manually
+### Run Silver to Gold Manually
 
 ```bash
 docker compose up gold_builder
 ```
 
-### Run training manually
+### Run Training Manually
 
 ```bash
 docker compose up training
 ```
 
-## Validating the Pipeline
+---
 
-### Validate Kafka producer and consumer
+## Validation
 
-Check producer logs:
+### Validate Kafka Producer
 
 ```bash
 docker logs -f mlops_producer
@@ -685,7 +1139,9 @@ Expected messages:
 [PRODUCER] Delivered transaction_id=...
 ```
 
-Check consumer logs:
+---
+
+### Validate Main Consumer
 
 ```bash
 docker logs -f mlops_consumer
@@ -695,9 +1151,21 @@ Expected messages:
 
 ```text
 [CONSUMER] Received transaction_id=...
-[CONSUMER] Uploaded to MinIO: fraud-lake/bronze/transactions/...
+[CONSUMER] Uploaded to MinIO: ...
 [CONSUMER] Upserted into Neo4j: transaction_id=...
 ```
+
+---
+
+### Validate Scoring
+
+```bash
+docker logs -f mlops_scoring
+```
+
+The scoring service should consume transactions from `raw_events`, load the model from MinIO, and route transactions to either `approved_transactions` or `blocked_transactions`.
+
+---
 
 ### Validate MinIO
 
@@ -729,17 +1197,15 @@ gold/
 _state/
 ```
 
-If `gold/` does not appear, run:
+Expected folders in `ml-artifacts`:
 
-```bash
-docker compose up gold_builder
+```text
+models/
+metrics/
+reports/
 ```
 
-Then run:
-
-```bash
-docker compose up training
-```
+---
 
 ### Validate Neo4j
 
@@ -764,6 +1230,8 @@ RETURN l.value AS label, count(t) AS count
 ORDER BY label;
 ```
 
+---
+
 ### Validate GraphQL
 
 Open:
@@ -783,6 +1251,8 @@ query {
   }
 }
 ```
+
+---
 
 ### Validate Airflow
 
@@ -806,174 +1276,160 @@ Expected task order:
 run_producer_batch -> validate_minio -> validate_neo4j
 ```
 
-## Data Lake Layers
+---
 
-### Bronze
+## Example GraphQL Queries
 
-Raw ingested JSON events.
+### Get One Transaction
 
-```text
-bronze/transactions/
+```graphql
+query {
+  transaction(transactionId: 1) {
+    transactionId
+    time
+    amount
+    classValue
+    label {
+      value
+    }
+    timeBucket {
+      bucketId
+      startTime
+      endTime
+    }
+    amountBucket {
+      bucketId
+      minAmount
+      maxAmount
+    }
+  }
+}
 ```
 
-Purpose:
+### Get Latest Transactions
 
-- Preserve raw incoming event data
-- Keep ingestion metadata
-- Avoid modifying the original event payload
-
-### Silver
-
-Cleaned transaction data.
-
-```text
-silver/transactions_clean/
+```graphql
+query {
+  transactions(limit: 10) {
+    transactionId
+    amount
+    classValue
+    label {
+      value
+    }
+  }
+}
 ```
 
-Purpose:
+### Get Fraud Transactions
 
-- Normalize fields
-- Validate schema
-- Prepare data for feature generation
-
-### Gold
-
-Training-ready dataset.
-
-```text
-gold/training_features/version=v1/
+```graphql
+query {
+  fraudTransactions(limit: 10) {
+    transactionId
+    amount
+    classValue
+    label {
+      value
+    }
+  }
+}
 ```
 
-Purpose:
+---
 
-- Store feature tables
-- Include train, validation, and test splits
-- Provide stable input for model training
+## Example Neo4j Queries
 
-## ML Artifacts
+### Count Transactions
 
-The training service writes outputs to the `ml-artifacts` bucket.
-
-Expected layout:
-
-```text
-ml-artifacts/
-├── models/
-│   └── fraud_model/
-│       └── version=v1/
-│           └── run=<run_id>/
-│               └── model.joblib
-│
-├── metrics/
-│   └── fraud_model/
-│       └── version=v1/
-│           └── run=<run_id>/
-│               └── metrics.json
-│
-└── reports/
-    └── fraud_model/
-        └── version=v1/
-            └── run=<run_id>/
-                └── report.json
+```cypher
+MATCH (t:Transaction)
+RETURN count(t) AS transactions;
 ```
 
-## Current Model
+### Get Fraud Transactions
 
-The current training service uses a simple baseline model:
-
-```text
-StandardScaler + LogisticRegression
+```cypher
+MATCH (t:Transaction)-[:HAS_LABEL]->(:Label {value: 1})
+RETURN t.transaction_id, t.amount, t.time
+ORDER BY t.transaction_id DESC
+LIMIT 25;
 ```
 
-Model configuration:
+### Count Transactions by Amount Bucket
 
-```text
-solver: lbfgs
-max_iter: 5000
-class_weight: balanced
-random_state: 42
+```cypher
+MATCH (t:Transaction)-[:IN_AMOUNT_BUCKET]->(ab:AmountBucket)
+RETURN ab.bucket_id, count(t) AS transactions
+ORDER BY transactions DESC;
 ```
 
-This is intentionally simple because the project focuses on the MLOps pipeline, not on maximizing predictive performance.
+### Count Transactions by Time Bucket
 
-## Why Neo4j Is Used
+```cypher
+MATCH (t:Transaction)-[:IN_TIME_BUCKET]->(tb:TimeBucket)
+RETURN tb.bucket_id, count(t) AS transactions
+ORDER BY tb.bucket_id;
+```
 
-Neo4j is used to represent transactions as a graph.
+### Fraud Distribution by Amount Bucket
 
-Instead of storing each transaction only as a flat row, each transaction is connected to:
+```cypher
+MATCH (t:Transaction)-[:IN_AMOUNT_BUCKET]->(ab:AmountBucket),
+      (t)-[:HAS_LABEL]->(l:Label)
+RETURN ab.bucket_id AS amount_bucket,
+       l.value AS label,
+       count(t) AS transactions
+ORDER BY amount_bucket, label;
+```
 
-- Its fraud label
-- Its time bucket
-- Its amount bucket
-- Groups of latent PCA-like features
-
-This makes it possible to query relationships such as:
-
-- Fraud distribution by amount bucket
-- Fraud distribution by time bucket
-- Transactions connected to specific feature groups
-- High-risk graph neighborhoods
-- Aggregated graph patterns
-
-## Why MinIO Is Used
-
-MinIO provides an S3-compatible local object store. In this project it works as a local data lake.
-
-It is useful because it separates:
-
-- Raw data
-- Cleaned data
-- Training features
-- Model artifacts
-- Metrics
-- Reports
-
-This is closer to a production ML architecture than storing everything as local folders inside one container.
-
-## Development Notes
-
-This project is designed for local experimentation and portfolio demonstration.
-
-It is not production-ready as-is because:
-
-- Credentials are simple local defaults
-- Services run on a single Docker Compose environment
-- There is no authentication layer on the GraphQL API
-- There is no CI/CD pipeline yet
-- The model is a baseline classifier
-- Monitoring and alerting are not implemented yet
-
-## Possible Improvements
-
-Useful next improvements:
-
-- Add MLflow for experiment tracking
-- Add model registry behavior
-- Add batch inference service
-- Add real-time inference consumer
-- Add Prometheus and Grafana monitoring
-- Add data quality checks with Great Expectations
-- Add unit and integration tests
-- Add GitHub Actions CI
-- Add a dashboard for fraud analytics
-- Add GraphQL queries for aggregate fraud metrics
-- Add gRPC service for model inference
-- Add versioned model promotion workflow
-- Add Makefile commands for easier operation
+---
 
 ## Troubleshooting
 
-### Gold folder does not appear in MinIO
+### MinIO Is Empty
+
+Check producer and consumer logs:
+
+```bash
+docker logs -f mlops_producer
+docker logs -f mlops_consumer
+```
+
+Make sure the dataset exists at:
+
+```text
+data/creditcard.csv
+```
+
+---
+
+### Dataset Is Missing
+
+Make sure the dataset exists at:
+
+```text
+data/creditcard.csv
+```
+
+Or make sure `kaggle.json` exists in the project root before running the ingestion service.
+
+---
+
+### Gold Folder Does Not Appear in MinIO
 
 Run:
 
 ```bash
+docker compose up transform
 docker compose up gold_builder
 ```
 
 Then refresh MinIO.
 
-### Training fails because no Gold files exist
+---
+
+### Training Fails Because Gold Data Is Missing
 
 Run the pipeline in this order:
 
@@ -984,7 +1440,31 @@ docker compose up gold_builder
 docker compose up training
 ```
 
-### Airflow database does not exist
+---
+
+### Scoring Fails Because the Model Is Missing
+
+The scoring service expects the model at:
+
+```text
+ml-artifacts/models/fraud_model/latest/model.joblib
+```
+
+Run training first:
+
+```bash
+docker compose up training
+```
+
+Then restart scoring:
+
+```bash
+docker compose restart scoring
+```
+
+---
+
+### Airflow Database Does Not Exist
 
 The repository includes:
 
@@ -1001,17 +1481,9 @@ docker compose down -v
 docker compose up --build
 ```
 
-### Dataset is missing
+---
 
-Make sure the dataset exists at:
-
-```text
-data/creditcard.csv
-```
-
-Or make sure `kaggle.json` exists in the project root before running the ingestion service.
-
-### Kafka topic does not exist
+### Kafka Topic Does Not Exist
 
 The `kafka-init` service creates the `raw_events` topic automatically.
 
@@ -1023,7 +1495,31 @@ docker exec -it mlops_kafka /opt/kafka/bin/kafka-topics.sh \
   --list
 ```
 
-### Neo4j has no transactions
+If approved or blocked topics are missing, create them manually:
+
+```bash
+docker exec -it mlops_kafka /opt/kafka/bin/kafka-topics.sh \
+  --create \
+  --if-not-exists \
+  --topic approved_transactions \
+  --bootstrap-server kafka:9092 \
+  --partitions 1 \
+  --replication-factor 1
+```
+
+```bash
+docker exec -it mlops_kafka /opt/kafka/bin/kafka-topics.sh \
+  --create \
+  --if-not-exists \
+  --topic blocked_transactions \
+  --bootstrap-server kafka:9092 \
+  --partitions 1 \
+  --replication-factor 1
+```
+
+---
+
+### Neo4j Has No Transactions
 
 Make sure the consumer is running and the producer has sent events.
 
@@ -1039,24 +1535,69 @@ MATCH (t:Transaction)
 RETURN count(t);
 ```
 
-### GraphQL returns empty results
+---
 
-Check that Neo4j contains transactions first.
+### GraphQL Returns Empty Results
+
+GraphQL reads from Neo4j. First check that Neo4j contains transactions:
 
 ```cypher
 MATCH (t:Transaction)
 RETURN count(t);
 ```
 
-Then check the GraphQL API health endpoint:
+Then check the GraphQL health endpoint:
 
 ```text
 http://localhost:8000/health
 ```
 
+---
+
+## Development Notes
+
+This project is designed for local experimentation and portfolio demonstration.
+
+It is not production-ready as-is because:
+
+- Credentials are simple local defaults
+- Services run in a single Docker Compose environment
+- The GraphQL API has no authentication layer
+- There is no CI/CD pipeline yet
+- The model is a baseline classifier
+- Monitoring and alerting are not implemented yet
+- Secrets are handled only for local development
+
+---
+
+## Possible Improvements
+
+Useful next improvements:
+
+- Add MLflow for experiment tracking
+- Add a model registry
+- Add batch inference
+- Add real-time inference monitoring
+- Add Prometheus and Grafana
+- Add data quality checks with Great Expectations
+- Add unit and integration tests
+- Add GitHub Actions CI
+- Add a dashboard for fraud analytics
+- Add GraphQL aggregate queries
+- Add gRPC model serving
+- Add model promotion between versions
+- Add drift detection
+- Add Makefile commands for easier operation
+- Add `.env.example`
+- Add architecture image to the README
+
+---
+
 ## License
 
 This project is intended for educational and portfolio purposes. Add a license file if you want to define explicit usage permissions.
+
+---
 
 ## Author
 
