@@ -6,6 +6,7 @@ import os
 import pandas as pd
 from minio import Minio
 from minio.error import S3Error
+import time
 
 
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
@@ -140,11 +141,35 @@ def upload_incremental_parquet(client: Minio, df: pd.DataFrame) -> str:
 
     return object_name
 
+def ensure_bucket_exists(client, bucket_name: str) -> None:
+    try:
+        if not client.bucket_exists(bucket_name):
+            client.make_bucket(bucket_name)
+    except S3Error as e:
+        if e.code in {"BucketAlreadyOwnedByYou", "BucketAlreadyExists"}:
+            return
+        raise
+
+
+def is_missing_object_error(error: S3Error) -> bool:
+    return error.code in {"NoSuchKey", "NoSuchObject", "NoSuchBucket"}
+
+
+def safe_load_state(client):
+    try:
+        return load_state(client)
+    except S3Error as e:
+        if is_missing_object_error(e):
+            print("[TRANSFORM] No previous state found. Starting from empty state.")
+            return {"processed_files": []}
+        raise
+
 
 def main():
     client = get_minio_client()
 
-    state = load_state(client)
+    ensure_bucket_exists(client, MINIO_BUCKET)
+    state = safe_load_state(client)
     processed = set(state.get("processed_objects", []))
 
     all_bronze_objects = list_bronze_json_objects(client)
@@ -155,7 +180,8 @@ def main():
     print(f"[TRANSFORM] New objects to process: {len(new_objects)}")
 
     if not new_objects:
-        print("[TRANSFORM] No new bronze files found")
+        print("[TRANSFORM] No new bronze files found. Waiting...")
+        time.sleep(5)
         return
 
     df = build_incremental_dataframe(client, new_objects)
@@ -181,4 +207,14 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    while True:
+        try:
+            main()
+        except S3Error as e:
+            if is_missing_object_error(e):
+                print(f"[TRANSFORM] Dependency not ready yet: {e}. Retrying...")
+            else:
+                raise
+
+        print("[TRANSFORM] Sleeping before next iteration...")
+        time.sleep(5)

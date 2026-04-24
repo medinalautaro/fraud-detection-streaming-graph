@@ -4,7 +4,7 @@ import uuid
 import hashlib
 from io import BytesIO
 from datetime import datetime, timezone
-
+import time
 import pandas as pd
 from minio import Minio
 from minio.error import S3Error
@@ -180,11 +180,34 @@ def upload_gold_parquet(client: Minio, df: pd.DataFrame) -> str:
     )
     return object_name
 
+def ensure_bucket_exists(client, bucket_name: str) -> None:
+    try:
+        if not client.bucket_exists(bucket_name):
+            client.make_bucket(bucket_name)
+    except S3Error as e:
+        if e.code in {"BucketAlreadyOwnedByYou", "BucketAlreadyExists"}:
+            return
+        raise
+
+
+def is_missing_object_error(error: S3Error) -> bool:
+    return error.code in {"NoSuchKey", "NoSuchObject", "NoSuchBucket"}
+
+
+def safe_load_state(client):
+    try:
+        return load_state(client)
+    except S3Error as e:
+        if is_missing_object_error(e):
+            print("[GOLD] No previous state found. Starting from empty state.")
+            return {"processed_files": []}
+        raise
 
 def main():
     client = get_minio_client()
 
-    state = load_state(client)
+    ensure_bucket_exists(client, MINIO_BUCKET)
+    state = safe_load_state(client)
     processed = set(state.get("processed_objects", []))
 
     all_silver_objects = list_silver_objects(client)
@@ -196,6 +219,7 @@ def main():
 
     if not new_silver_objects:
         print("[GOLD] No new silver files found")
+        time.sleep(5)
         return
 
     df = build_gold_dataframe(client, new_silver_objects)
@@ -219,4 +243,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    while True:
+        try:
+            main()
+        except Exception as e:
+            print(f"[GOLD] Error or dependency not ready: {e}")
+
+        print("[GOLD] Sleeping before next iteration...")
+        time.sleep(5)

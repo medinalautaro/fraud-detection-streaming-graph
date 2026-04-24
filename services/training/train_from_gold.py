@@ -1,12 +1,13 @@
 import json
 import os
-import uuid
+import time
 from io import BytesIO
 from datetime import datetime, timezone
-from minio.error import S3Error
+
 import joblib
 import pandas as pd
 from minio import Minio
+from minio.error import S3Error
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
@@ -34,6 +35,13 @@ MODEL_PREFIX = os.getenv("MODEL_PREFIX", "models/fraud_model/")
 METRICS_PREFIX = os.getenv("METRICS_PREFIX", "metrics/fraud_model/")
 REPORTS_PREFIX = os.getenv("REPORTS_PREFIX", "reports/fraud_model/")
 
+TRAIN_EVERY_N_NEW_ROWS = int(os.getenv("TRAIN_EVERY_N_NEW_ROWS", "1000"))
+TRAIN_POLL_SECONDS = int(os.getenv("TRAIN_POLL_SECONDS", "30"))
+TRAINING_STATE_OBJECT = os.getenv(
+    "TRAINING_STATE_OBJECT",
+    "_state/training/last_training_state.json",
+)
+
 if not MINIO_ACCESS_KEY or not MINIO_SECRET_KEY:
     raise ValueError("Missing MINIO_ACCESS_KEY or MINIO_SECRET_KEY")
 
@@ -45,6 +53,7 @@ FEATURE_COLUMNS = [
     "V21", "V22", "V23", "V24", "V25", "V26", "V27", "V28",
 ]
 LABEL_COLUMN = "Class"
+ID_COLUMN = "transaction_id"
 
 MODEL_TYPE = "logistic_regression"
 USE_SCALER = True
@@ -63,9 +72,17 @@ def get_minio_client() -> Minio:
     )
 
 
-def ensure_bucket_exists(client: Minio, bucket_name: str) -> None:
-    if not client.bucket_exists(bucket_name):
-        client.make_bucket(bucket_name)
+def ensure_bucket_exists(client, bucket_name: str) -> None:
+    try:
+        if not client.bucket_exists(bucket_name):
+            client.make_bucket(bucket_name)
+    except S3Error as e:
+        if e.code in {"BucketAlreadyOwnedByYou", "BucketAlreadyExists"}:
+            return
+        raise
+
+def is_missing_object_error(error: S3Error) -> bool:
+    return error.code in {"NoSuchKey", "NoSuchObject", "NoSuchBucket"}
 
 
 def list_gold_objects(client: Minio) -> list[str]:
@@ -110,10 +127,34 @@ def load_gold_dataframe(client: Minio) -> pd.DataFrame:
 
 
 def validate_gold_dataframe(df: pd.DataFrame) -> None:
-    required = FEATURE_COLUMNS + [LABEL_COLUMN, "split", "dataset_version"]
+    required = FEATURE_COLUMNS + [LABEL_COLUMN, ID_COLUMN, "split", "dataset_version"]
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns in Gold data: {missing}")
+
+
+def validate_trainable_splits(train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame) -> None:
+    if train_df.empty or val_df.empty or test_df.empty:
+        raise ValueError("One of the dataset splits is empty")
+
+    train_classes = set(train_df[LABEL_COLUMN].astype(int).unique())
+    val_classes = set(val_df[LABEL_COLUMN].astype(int).unique())
+    test_classes = set(test_df[LABEL_COLUMN].astype(int).unique())
+
+    if train_classes != {0, 1}:
+        raise ValueError(
+            f"Training split is not trainable yet. Classes found: {sorted(train_classes)}"
+        )
+
+    if val_classes != {0, 1}:
+        raise ValueError(
+            f"Validation split is not evaluable yet. Classes found: {sorted(val_classes)}"
+        )
+
+    if test_classes != {0, 1}:
+        raise ValueError(
+            f"Test split is not evaluable yet. Classes found: {sorted(test_classes)}"
+        )
 
 
 def compute_metrics(y_true, y_pred, y_prob=None) -> dict:
@@ -136,6 +177,7 @@ def compute_metrics(y_true, y_pred, y_prob=None) -> dict:
 
 
 def upload_bytes(client: Minio, bucket_name: str, object_name: str, raw: bytes, content_type: str):
+    ensure_bucket_exists(client, bucket_name)
     client.put_object(
         bucket_name=bucket_name,
         object_name=object_name,
@@ -144,12 +186,13 @@ def upload_bytes(client: Minio, bucket_name: str, object_name: str, raw: bytes, 
         content_type=content_type,
     )
 
+
 def object_exists(client: Minio, bucket_name: str, object_name: str) -> bool:
     try:
         client.stat_object(bucket_name, object_name)
         return True
     except S3Error as e:
-        if e.code in {"NoSuchKey", "NoSuchObject"}:
+        if is_missing_object_error(e):
             return False
         raise
 
@@ -171,8 +214,8 @@ def evaluate_model(model, X, y) -> dict:
 
 
 def should_promote(candidate_metrics: dict, current_metrics: dict | None) -> tuple[bool, str]:
-    PROMOTION_MIN_DELTA = 0.005
-    RECALL_TOLERANCE = 0.01
+    promotion_min_delta = float(os.getenv("PROMOTION_MIN_DELTA", "0.005"))
+    recall_tolerance = float(os.getenv("RECALL_TOLERANCE", "0.01"))
 
     if current_metrics is None:
         return True, "No existing latest model"
@@ -182,36 +225,107 @@ def should_promote(candidate_metrics: dict, current_metrics: dict | None) -> tup
     cand_recall = candidate_metrics["recall"]
     curr_recall = current_metrics["recall"]
 
-    if cand_f1 <= curr_f1 + PROMOTION_MIN_DELTA:
+    if cand_f1 <= curr_f1 + promotion_min_delta:
         return (
             False,
-            f"Candidate f1={cand_f1:.6f} not greater than current f1={curr_f1:.6f} + min_delta={PROMOTION_MIN_DELTA:.6f}",
+            f"Candidate f1={cand_f1:.6f} not greater than current f1={curr_f1:.6f} "
+            f"+ min_delta={promotion_min_delta:.6f}",
         )
 
-    if cand_recall < curr_recall - RECALL_TOLERANCE:
+    if cand_recall < curr_recall - recall_tolerance:
         return (
             False,
-            f"Candidate recall={cand_recall:.6f} is worse than current recall={curr_recall:.6f} beyond tolerance={RECALL_TOLERANCE:.6f}",
+            f"Candidate recall={cand_recall:.6f} is worse than current recall={curr_recall:.6f} "
+            f"beyond tolerance={recall_tolerance:.6f}",
         )
 
     return True, "Candidate outperformed current latest"
 
+
+def load_training_state(client: Minio) -> dict:
+    try:
+        response = client.get_object(ARTIFACTS_BUCKET, TRAINING_STATE_OBJECT)
+        try:
+            return json.loads(response.read().decode("utf-8"))
+        finally:
+            response.close()
+            response.release_conn()
+    except S3Error as e:
+        if is_missing_object_error(e):
+            return {
+                "last_trained_row_count": 0,
+                "last_training_at": None,
+                "last_run_id": None,
+                "last_promoted": None,
+            }
+        raise
+
+
+def save_training_state(client: Minio, state: dict) -> None:
+    raw = json.dumps(state, indent=2).encode("utf-8")
+    upload_bytes(
+        client,
+        ARTIFACTS_BUCKET,
+        TRAINING_STATE_OBJECT,
+        raw,
+        "application/json",
+    )
+
+
+def should_train_based_on_new_rows(client: Minio, df: pd.DataFrame) -> tuple[bool, dict]:
+    ensure_bucket_exists(client, ARTIFACTS_BUCKET)
+
+    training_state = load_training_state(client)
+    last_trained_row_count = int(training_state.get("last_trained_row_count", 0))
+
+    current_row_count = int(df[ID_COLUMN].nunique())
+    new_rows = current_row_count - last_trained_row_count
+
+    metadata = {
+        "current_row_count": current_row_count,
+        "last_trained_row_count": last_trained_row_count,
+        "new_rows": new_rows,
+        "required_new_rows": TRAIN_EVERY_N_NEW_ROWS,
+    }
+
+    if last_trained_row_count == 0:
+        return True, metadata
+
+    if new_rows >= TRAIN_EVERY_N_NEW_ROWS:
+        return True, metadata
+
+    return False, metadata
+
+
 def main():
     client = get_minio_client()
+    ensure_bucket_exists(client, GOLD_BUCKET)
     ensure_bucket_exists(client, ARTIFACTS_BUCKET)
 
     df = load_gold_dataframe(client)
     validate_gold_dataframe(df)
 
+    should_train, row_metadata = should_train_based_on_new_rows(client, df)
+    if not should_train:
+        raise ValueError(
+            "Not enough new rows for retraining. "
+            f"current_rows={row_metadata['current_row_count']}, "
+            f"last_trained_row_count={row_metadata['last_trained_row_count']}, "
+            f"new_rows={row_metadata['new_rows']}, "
+            f"required={row_metadata['required_new_rows']}"
+        )
+
     print(f"[TRAIN] Total Gold rows: {len(df)}")
+    print(f"[TRAIN] Unique Gold transactions: {row_metadata['current_row_count']}")
+    print(f"[TRAIN] New rows since last training: {row_metadata['new_rows']}")
     print(f"[TRAIN] Split counts:\n{df['split'].value_counts(dropna=False)}")
+    print(f"[TRAIN] Class counts:\n{df[LABEL_COLUMN].value_counts(dropna=False)}")
 
     train_df = df[df["split"] == "train"].copy()
     val_df = df[df["split"] == "val"].copy()
     test_df = df[df["split"] == "test"].copy()
 
-    if train_df.empty or val_df.empty or test_df.empty:
-        raise ValueError("One of the dataset splits is empty")
+    validate_trainable_splits(train_df, val_df, test_df)
 
     X_train = train_df[FEATURE_COLUMNS]
     y_train = train_df[LABEL_COLUMN].astype(int)
@@ -222,7 +336,6 @@ def main():
     X_test = test_df[FEATURE_COLUMNS]
     y_test = test_df[LABEL_COLUMN].astype(int)
 
-
     model = Pipeline([
         ("scaler", StandardScaler()),
         ("clf", LogisticRegression(
@@ -232,7 +345,6 @@ def main():
             random_state=LOGREG_RANDOM_STATE,
         )),
     ])
-
 
     model.fit(X_train, y_train)
 
@@ -300,9 +412,19 @@ def main():
         "data_metadata": {
             "feature_columns": FEATURE_COLUMNS,
             "label_column": LABEL_COLUMN,
+            "row_metadata": row_metadata,
             "train_rows": int(len(train_df)),
             "val_rows": int(len(val_df)),
             "test_rows": int(len(test_df)),
+            "train_class_counts": {
+                str(k): int(v) for k, v in train_df[LABEL_COLUMN].value_counts().to_dict().items()
+            },
+            "val_class_counts": {
+                str(k): int(v) for k, v in val_df[LABEL_COLUMN].value_counts().to_dict().items()
+            },
+            "test_class_counts": {
+                str(k): int(v) for k, v in test_df[LABEL_COLUMN].value_counts().to_dict().items()
+            },
         },
         "val_metrics": val_metrics,
         "test_metrics": test_metrics,
@@ -342,6 +464,7 @@ def main():
         json.dumps(metrics_payload, indent=2).encode("utf-8"),
         "application/json",
     )
+
     upload_bytes(
         client,
         ARTIFACTS_BUCKET,
@@ -350,14 +473,58 @@ def main():
         "application/json",
     )
 
-
+    save_training_state(
+        client,
+        {
+            "last_trained_row_count": row_metadata["current_row_count"],
+            "last_training_at": now.isoformat(),
+            "last_run_id": run_id,
+            "last_promoted": promote,
+            "latest_model_object": latest_model_object if promote else None,
+            "versioned_model_object": model_object,
+            "metrics_object": metrics_object,
+            "report_object": report_object,
+        },
+    )
 
     print(f"[TRAIN] Uploaded model: {ARTIFACTS_BUCKET}/{model_object}")
     print(f"[TRAIN] Uploaded metrics: {ARTIFACTS_BUCKET}/{metrics_object}")
     print(f"[TRAIN] Uploaded report: {ARTIFACTS_BUCKET}/{report_object}")
+    print(f"[TRAIN] Updated training state: {ARTIFACTS_BUCKET}/{TRAINING_STATE_OBJECT}")
     print(f"[TRAIN] Validation metrics: {val_metrics}")
     print(f"[TRAIN] Test metrics: {test_metrics}")
 
 
+def run_forever():
+    retry_messages = [
+        "No Gold parquet files found",
+        "Gold parquet files exist but produced no rows",
+        "One of the dataset splits is empty",
+        "Training split is not trainable yet",
+        "Validation split is not evaluable yet",
+        "Test split is not evaluable yet",
+        "Not enough new rows for retraining",
+    ]
+
+    while True:
+        try:
+            main()
+        except ValueError as e:
+            if any(msg in str(e) for msg in retry_messages):
+                print(f"[TRAIN] Waiting: {e}. Retrying in {TRAIN_POLL_SECONDS} seconds...")
+                time.sleep(TRAIN_POLL_SECONDS)
+                continue
+            raise
+        except S3Error as e:
+            if is_missing_object_error(e):
+                print(f"[TRAIN] MinIO dependency not ready yet: {e}. Retrying in {TRAIN_POLL_SECONDS} seconds...")
+                time.sleep(TRAIN_POLL_SECONDS)
+                continue
+            raise
+
+        print(f"[TRAIN] Training cycle finished. Checking again in {TRAIN_POLL_SECONDS} seconds...")
+        time.sleep(TRAIN_POLL_SECONDS)
+
+
 if __name__ == "__main__":
-    main()
+    run_forever()
